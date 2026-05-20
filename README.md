@@ -122,8 +122,7 @@ mode, add it to the fixtures — it becomes automated from that point forward.
 
 ## Projects Using This
 
-- VitalSync (Stryde MCP server) — `tests/qa/`
-- Add yours here
+- Add yours here (open a PR)
 
 ## What This Does Not Do
 

@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+dist/
+*.js.map
+
+# Claude Code internal
+.claude/worktrees/
+.claude/settings.local.json
+
+# Test
+.testmondata
+coverage/
