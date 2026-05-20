@@ -1,0 +1,16 @@
+{
+	"name": "agentic-patterns",
+	"version": "0.1.0",
+	"description": "Adversarial QA framework and engineering patterns for headless MCP servers",
+	"type": "module",
+	"main": "./qa-framework/src/index.ts",
+	"exports": {
+		"./qa-framework": "./qa-framework/src/index.ts"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"typescript": "^5.4.0"
+	}
+}
