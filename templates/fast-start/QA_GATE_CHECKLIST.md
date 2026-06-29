@@ -110,6 +110,43 @@ When output looks wrong, find the root cause class **before** reaching for the p
 
 ---
 
+## QA-6 — Mutation testing on the logic core (not just line coverage)
+
+Line coverage measures *execution*, not *verification*. Tests written **after** the code tend to
+assert whatever the function currently outputs rather than the correct behavior — flip a `>` to
+`<` or a `+` to `-` and every test still passes. LLM-generated tests are especially prone to this.
+
+- [ ] **Mutation testing** (Stryker for TS, `mutmut` / `cosmic-ray` for Python) runs on the
+      **business-logic core** — not the whole suite (it's slow). Inject operator/return mutants;
+      a **surviving mutant is a test that asserts nothing**.
+- [ ] A **mutation-score floor** is set in CI config for critical modules. A sub-50% score under
+      80% line coverage is the signature of tautological tests.
+- [ ] The job lives in `scaffold/ci/ci.yml.template` (the `mutation` job, optional / on-demand by
+      default). Wire it as a real gate once the logic core stabilizes.
+
+> The cheap manual probe: pick one critical function, invert an operator, run the tests. If
+> nothing fails, the tests are tautological — they execute the code without verifying it.
+
+---
+
+## QA-7 — An oracle for non-deterministic output (metamorphic + fuzz)
+
+An LLM coach (or any probabilistic component) has no fixed expected string, so exact-match
+assertions are brittle or absent — the output goes effectively unverified.
+
+- [ ] **Metamorphic relations** — assert *relative* behavior across related inputs instead of an
+      absolute output. More workout duration ⇒ strictly higher caloric estimate; hotter ambient
+      temp ⇒ higher recommended hydration. The exact number is unknown; the **relation** is a hard
+      invariant. At least one relation per non-deterministic tool.
+- [ ] **Boundary fuzzing** (fast-check / Hypothesis) at the untrusted input edge — prove malformed
+      input is rejected with a typed error, never crashes the loop or leaks a raw DB/internal error.
+- [ ] See `scaffold/tests/metamorphic.example.test.ts` for both halves.
+
+> "I can't assert the exact response, so I assert nothing" is the trap. You can always assert the
+> *direction* the output must move.
+
+---
+
 ## One-line pre-commit self-check
 
 ```
@@ -118,4 +155,6 @@ When output looks wrong, find the root cause class **before** reaching for the p
 [ ] Results classified VPASS/VFAIL/QUAL/ART/NA; isolation on; test TTL == prod (QA-3)
 [ ] Wrong output triaged L1 vs L2; L2s have a seam-contract ID (QA-4)
 [ ] Ledger updated with date + SHA + counts        (QA-5)
+[ ] Logic core has a mutation run; no trivial surviving mutants (QA-6)
+[ ] Non-deterministic output has a metamorphic relation + boundary fuzz (QA-7)
 ```

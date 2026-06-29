@@ -12,10 +12,13 @@ executes this skill.
 
 **Purpose:** Audit ANY project (any stack) for the stability gap classes that cause
 silent production failures — the writer→reader seam drifts, silent-failure handlers,
-migration-chain breaks, boundary bypasses, hot-path regressions, QA-honesty gaps, and
-(for agentic systems) TKA authority leaks. Broader than `/audit-mcp`, which only covers
-MCP tool ergonomics. Produces a PASS / FAIL / PARTIAL / N-A table with file + line
-references and a prioritized "these will bite you" shortlist.
+migration-chain breaks, boundary bypasses, hot-path regressions, QA-honesty gaps,
+resilience-under-load gaps, distributed-correctness (dual-write) gaps, and
+(for agentic systems) TKA authority leaks plus the adversarial S/W surface. Broader than
+`/audit-mcp`, which only covers MCP tool ergonomics. Produces a PASS / FAIL / PARTIAL /
+N-A table with file + line references and a prioritized "these will bite you" shortlist.
+
+**Coverage:** 10 themes (A–J), ~42 gap classes.
 
 **The skill does NOT fix code — it audits and reports only.** No edits, no commits.
 
@@ -46,13 +49,28 @@ ls "$ROOT"/alembic*/ "$ROOT"/**/migrations/ "$ROOT"/drizzle/ 2>/dev/null
 grep -rlE "asyncpg|psycopg|drizzle-orm|pg\b|sqlalchemy" "$ROOT" --include="*.ts" --include="*.py" 2>/dev/null | head
 # Agentic? (AGENT-* applies ONLY if this hits)
 grep -rlE "tools/list|inputSchema|@mcp\.tool|McpServer|tool_use|create_task|spawn.*agent|subagent" "$ROOT" --include="*.ts" --include="*.py" 2>/dev/null | head
+# Scaled / external-dependency / LLM-retry? (RESIL-* applies ONLY if this hits)
+ls "$ROOT"/{Dockerfile,cloudbuild.yaml,*.yaml,k8s*,helm*} 2>/dev/null    # autoscaled deploy
+grep -rlE "fetch\(|httpx|requests\.|aiohttp|pool\.acquire|createPool|new Pool|max_connections|autoscal|min_instances|max_instances|retry|backoff" "$ROOT" --include="*.ts" --include="*.py" --include="*.yaml" 2>/dev/null | head
+# Multi-store / dual-write? (DIST-* applies ONLY if a write spans >1 store/service)
+grep -rlE "outbox|saga|compensat|publish.*event|webhook|enqueue|\.send\(|second.*service|cross.*service" "$ROOT" --include="*.ts" --include="*.py" 2>/dev/null | head
 ```
 
 Decide and announce:
 - **Language(s):** Python / TypeScript / other.
 - **DB + migrations present?** If no migrations → mark all MIG-* as **N-A**.
 - **Agentic / MCP / LLM-client system?** If no (a plain CLI/web app with no LLM writing
-  state, no autonomous loop, no sub-agents) → mark all AGENT-* as **N-A**.
+  state, no autonomous loop, no sub-agents) → mark all AGENT-* (T/K/A/P/I and the
+  adversarial **S/W**) as **N-A**.
+- **Horizontally-scaled / external-dependency / LLM-retry system?** RESIL-* applies if the
+  service is autoscaled (Cloud Run / k8s / replicas), fronts a shared datastore, calls an
+  external dependency on a request path, or is driven by an LLM client that can retry. A
+  single-instance local CLI with no external request path → mark all RESIL-* as **N-A**.
+- **Does any single logical action write to >1 store / service / external system?** DIST-*
+  applies only then (two services, or a DB table plus an external queue/API/webhook). A
+  strictly single-database system → mark all DIST-* as **N-A**.
+- **Rolling deploy?** If the deploy is rolling (Cloud Run / k8s — old and new containers
+  serve concurrently), MIG-5 applies. A stop-the-world / single-instance deploy → MIG-5 **N-A**.
 
 ### Step 2 — Probe each gap class
 
@@ -99,7 +117,15 @@ Grep recipes (Python `.py` and TypeScript `.ts` variants where relevant):
   grep migration history for `stamp`/manual-sync notes.
 - **MIG-2** code references table/column with no migration in same commit — grep new
   table/column names in code; confirm a migration in the same change creates them.
-- **MIG-3** NOT NULL added without DEFAULT, INSERTs unpatched —
+- **MIG-5** destructive migration under a rolling deploy (no expand/contract) — *(N-A unless
+  the deploy is rolling — Cloud Run / k8s with old+new containers serving concurrently)*.
+  Does any migration add a `NOT NULL`-without-default, rename, drop, or type-narrow in a
+  single revision? grep `op.add_column.*nullable=False`, `op.alter_column`, `op.drop_column`,
+  `RENAME`, `ALTER COLUMN .* TYPE` across migrations. **FAIL** if a single revision mutates
+  existing structure and the deploy is rolling with no expand/contract split. **PARTIAL** if
+  some migrations follow expand/contract but at least one mutating revision does not.
+  **PASS** if every structural change ships additive-only (expand) with backfill + contract
+  deferred until old containers retire.
   `grep -rn "INSERT INTO <table>" $ROOT`; does each include every NOT NULL column?
 - **MIG-4** tests run on clean DB not prod snapshot — any tables created outside migrations
   (at app startup)? Does CI seed from `pg_dump --schema-only`?
@@ -117,6 +143,14 @@ Grep recipes (Python `.py` and TypeScript `.ts` variants where relevant):
   predicate, not just the PK? `LIMIT` on user-facing reads?
 - **BOUNDARY-5** config that should be DB-stored hardcoded in env — grep env-var allowlists
   used in request validation (`process.env`/`os.environ` in an auth/redirect check).
+- **BOUNDARY-7** SSRF via an agent-synthesized URL or identifier — grep tools that take a
+  URL/host/identifier and fetch it: `grep -rn "fetch(\|httpx\|requests\.\|aiohttp\|urlopen" $ROOT`
+  cross-referenced with model-supplied/tool args. For each, is the resolved destination
+  allowlisted (scheme + host) and are private/link-local ranges (`169.254.0.0/16`, `10/8`,
+  `127/8`, `::1`) blocked *after DNS resolution* (anti-rebinding)? Watch especially for fetch
+  of the cloud metadata endpoint `169.254.169.254`. **FAIL** if a model-influenced URL is
+  fetched with no allowlist / no private-range block. **PARTIAL** if allowlisted by scheme/host
+  but no post-resolution IP check. **N-A** if no tool fetches a model-influenced URL (non-agentic).
 - **BOUNDARY-6** sanitizer/guard wired to one path, not all — find the guard
   (scrubber / fence / rate limiter); enumerate every write entry point; is each behind it?
 
@@ -139,6 +173,19 @@ Grep recipes (Python `.py` and TypeScript `.ts` variants where relevant):
   can you reproduce by calling tools directly with no model? Is there a seam contract for it?
 - **QA-5** no regression baseline / ledger — is there a dated `docs/audits/` ledger with
   comparable runs (run → build SHA → counts)?
+- **QA-6** tautological assertions (coverage without fault detection) — is there a
+  mutation-testing run on the business-logic core, or only a line-coverage number?
+  `grep -rln "stryker\|mutmut\|cosmic-ray\|mutation" $ROOT` + config files. **FAIL** if there's
+  a coverage number but no mutation run on the logic core (a sub-50% mutation score under 80%
+  line coverage is the tautological-test signature). **PARTIAL** if mutation testing exists but
+  no CI mutation-score floor on critical modules. Spot-check: pick one critical function,
+  invert an operator (`>`→`<`, `+`→`-`) — does any test fail?
+- **QA-7** no oracle for non-deterministic output (missing metamorphic relations) — for each
+  non-deterministic/LLM tool, is there at least one *metamorphic relation* asserted (relative
+  behavior across related inputs — longer workout ⇒ strictly higher estimate, etc.) rather than
+  a brittle/absent exact-string match? Is the untrusted-input boundary property-fuzzed
+  (`grep -rln "fast-check\|hypothesis\|fuzz\|@given" $ROOT`)? **FAIL** if a probabilistic
+  component has no metamorphic relation and no boundary fuzz. **PARTIAL** if one but not both.
 
 **Theme G — Agentic Governance (TKA)** *(LLM-client / MCP / multi-agent ONLY; else N-A)*
 - **AGENT-T** Totem — can the model's output alone cause a state write with no independent
@@ -150,7 +197,25 @@ Grep recipes (Python `.py` and TypeScript `.ts` variants where relevant):
   hasn't seen? Is the category space (enums/tools/scopes) fixed at build time?
 - **AGENT-P** Point Man — when an agent spawns a sub-agent, is the sub-agent's authority
   scoped and attributed (delegation path + depth), or inherited wholesale?
-  `grep -rn "delegation\|agent_context\|authorized_by\|spawn" $ROOT`.
+  `grep -rn "delegation\|agent_context\|authorized_by\|spawn" $ROOT`. Also: are pass-through
+  tokens audience-checked (`aud`/scope vs the *user's* session) before forwarding, and can a
+  second connected server shadow a canonical tool name (tool-shadowing / confused deputy)?
+- **AGENT-S** semantic injection through the data / tool-result channel — trace each
+  consequential tool's arguments back to their source: can any be influenced by
+  attacker-controlled *stored/retrieved/synced* content (a log title, a synced route
+  description, a RAG document)? Shape validation (BOUNDARY-1) is blind to *meaning*. Is that
+  content fenced (BOUNDARY-6 scrubber on **every** external-data write path) AND is the tool
+  gated by a deterministic structural check (AGENT-T) rather than by the model reading the
+  fence? **FAIL** if a consequential tool's args can carry attacker-controlled content and the
+  gate is the model's own judgment. **PARTIAL** if fenced but the gate is still model-side.
+  **N-A** for non-agentic systems.
+- **AGENT-W** denial of wallet — is there a per-session/per-user budget enforced *outside* the
+  model: a hard ceiling on tool-call count, token spend, and wall-clock per task?
+  `grep -rn "budget\|max_tokens\|token.*ceiling\|cost.*limit\|max_turns\|rate.*limit" $ROOT`.
+  AGENT-K bounds the loop for correctness; AGENT-W bounds it for *cost* under an adversarial
+  request. **FAIL** if nothing stops a single user from driving unbounded LLM spend in one
+  session. **PARTIAL** if a turn cap exists (AGENT-K) but no token/cost/wall-clock ceiling.
+  **N-A** for non-agentic systems.
 - **AGENT-I** idempotency — `grep -rn "idempotency\|idempotent\|ON CONFLICT\|onConflict" $ROOT`;
   does each write tool accept an idempotency key with a unique constraint?
 
@@ -159,16 +224,72 @@ Grep recipes (Python `.py` and TypeScript `.ts` variants where relevant):
   log-vs-do, autonomous deploy) — note any you observe from repo structure/history as
   PARTIAL/observation; these are advisory, not pass/fail gates.
 
+**Theme I — Resilience Under Load & Cascading Failure** *(horizontally-scaled / external-
+dependency / LLM-retry systems ONLY; else N-A — see Step 1 gating)*
+- **RESIL-1** integration point with no circuit breaker — grep cross-process calls
+  (`grep -rn "fetch(\|httpx\|requests\.\|aiohttp\|pool.acquire\|client.call\|mcp.*call" $ROOT`).
+  Is any wrapped in a breaker (open after N failures / a latency threshold, fail fast while
+  open, half-open probe), or does each block indefinitely on a slow peer?
+  `grep -rln "circuit\|breaker\|CircuitBreaker\|opossum\|pybreaker\|tenacity" $ROOT`. **FAIL**
+  if cross-process calls have no breaker. **PARTIAL** if some integration points are wrapped
+  and others aren't.
+- **RESIL-2** no bulkhead / shared pool with no partition — is there one global connection /
+  thread pool / event loop for everything, or per-dependency partitions (a bounded pool or
+  concurrency semaphore per external dependency class)? `grep -rn "createPool\|new Pool\|create_pool\|Semaphore\|bulkhead\|max_size\|pool_size" $ROOT`. **FAIL** if a single slow
+  downstream can consume every connection of one shared pool. **PARTIAL** if some deps are
+  partitioned, core path is not.
+- **RESIL-3** unbounded retry → request storm → pool exhaustion — is there a retry/backoff
+  policy AND a client-side throttle? `grep -rn "retry\|backoff\|jitter\|throttle\|max_attempts" $ROOT`. Compute `max_instances × pool_size` — does it exceed Postgres `max_connections`?
+  **FAIL** if retries have no backoff/throttle OR `max_instances × pool_size > max_connections`.
+  **PARTIAL** if backoff exists but no adaptive client-side throttle, or the pool-math headroom
+  is unverified. (AGENT-I makes retries *safe*; RESIL-3 *bounds their rate* — distinct.)
+- **RESIL-4** no timeout budget on the synchronous tool path — grep synchronous external calls
+  on the request path; does each have a deadline (`AbortSignal.timeout` / `asyncio.wait_for` /
+  per-call statement timeout)? `grep -rn "wait_for\|AbortSignal.timeout\|statement_timeout\|timeout=" $ROOT`. Is there an overall request deadline (sum of hop deadlines, enforced)?
+  **FAIL** if foreground external calls await with no deadline. **PARTIAL** if individual calls
+  have timeouts but there's no end-to-end request budget. (FAIL-4 is the background version;
+  RESIL-4 is the hot path.)
+
+**Theme J — Distributed Correctness & Transactional Integrity** *(only when a single logical
+action writes to >1 store / service / external system; else N-A — see Step 1 gating)*
+- **DIST-1** dual write with no atomicity (lost-write / orphan) — grep for a DB write followed
+  by an external/second-service call in the same handler with no outbox between them.
+  `grep -rn -A6 "INSERT\|\.insert(\|UPDATE\|\.update(\|commit()" $ROOT | grep -iE "fetch|httpx|requests|publish|enqueue|\.send\(|client\."`. Is there an `outbox` table + publisher
+  (`grep -rln "outbox\|transactional.*outbox\|wal\|processed = false" $ROOT`), or a raw dual
+  write? **FAIL** if a local commit is followed by a second-store call with no outbox.
+  **PARTIAL** if an outbox exists for some flows but at least one raw dual write remains.
+  **N-A** if every write lands in a single store.
+- **DIST-2** multi-step write across services with no compensation (saga) — find multi-write
+  operations spanning ≥2 transactions/services. On a mid-sequence failure, is there a
+  compensation path, or are early steps left orphaned? `grep -rln "saga\|compensat\|rollback.*step\|undo" $ROOT`. **FAIL** if a multi-service write sequence has no compensation
+  on partial failure. **PARTIAL** if some steps compensate but not all. First check: could the
+  writes collapse into *one* ACID transaction (most "distributed" writes are same-DB)? If so
+  that's the finding. **N-A** if all writes share one transaction.
+- **DIST-3** at-least-once delivery with a non-idempotent consumer — for each event / queue /
+  webhook *consumer*, is there a dedupe on event ID or an idempotent apply (UPSERT / processed-
+  ID unique constraint)? `grep -rn "webhook\|consume\|on_event\|handler.*event\|subscribe" $ROOT`
+  cross-referenced with dedupe (`grep -rln "processed_ids\|event_id.*unique\|ON CONFLICT\|dedupe" $ROOT`). What happens if the same event is delivered twice? **FAIL** if a consumer applies
+  events with no dedupe (double-charge / double-log risk). **PARTIAL** if some consumers dedupe.
+  (AGENT-I dedupes the *producer's* write tool; DIST-3 is the *consumer* of the event stream.)
+  **N-A** if there are no event/queue/webhook consumers.
+
 ### Step 3 — Report
 
-Emit **one consolidated table grouped by theme** (A–H), each row: `ID | gap | status |
+Emit **one consolidated table grouped by theme** (A–J), each row: `ID | gap | status |
 file:line evidence`. Then a prioritized **"These will bite you"** shortlist: every FAIL
-first, ordered by blast radius (silent data corruption / auth bypass > latency > ergonomics),
-each line ending with the taxonomy's **day-1 prevention** as the recommended fix. PARTIALs
-follow. Close with: *"Report only — no edits applied."*
+first, ordered by blast radius (silent data corruption / auth bypass / cloud-credential
+exfil > availability/cascade > latency > ergonomics), each line ending with the taxonomy's
+**day-1 prevention** as the recommended fix. PARTIALs follow. Close with: *"Report only —
+no edits applied."*
 
-Blast-radius ordering hint: SEAM-1/2/5, FAIL-1/2, BOUNDARY-2/3/4, MIG-3, AGENT-T/I are
-silent-corruption or security class → top. PERF-* → middle. QA-* / PROC-* → context.
+Blast-radius ordering hint:
+- **Top (silent corruption / security / credential exfil):** SEAM-1/2/5, FAIL-1/2,
+  BOUNDARY-2/3/4/7, MIG-3/5, DIST-1/2/3, AGENT-T/P/S/I — and AGENT-W (cost) and BOUNDARY-7
+  (SSRF → metadata-endpoint / SA-token exfil) sit at the top of the security band.
+- **Availability / cascading failure:** RESIL-1/2/3/4 — a transient slow peer becoming a
+  self-inflicted global blackout outranks plain latency.
+- **Middle (latency):** PERF-*.
+- **Context (process / honesty):** QA-* (incl. QA-6/7) / PROC-*.
 
 ---
 

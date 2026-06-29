@@ -17,10 +17,10 @@ compiler, a test, or a CI gate — so they can't silently rot.
 
 | File | Establishes | Gap classes prevented |
 |------|-------------|----------------------|
-| `CLAUDE.md.template` | Project instructions: write-time defaults + the QA gate cycle | FAIL-1, BOUNDARY-1/2/3/4, PERF-2, QA-1/2, AGENT-* |
-| `ARCHITECTURE_INVARIANTS.md` | Structural invariants to fix **before** writing features | SEAM-1/2/3/4, BOUNDARY-5, AGENT-T/K/A/P/I |
-| `QA_GATE_CHECKLIST.md` | The gate: panel-before-commit, tests-as-deliverable, measurement honesty | QA-1/2/3/4/5 |
-| `DAY1_RUNBOOK.md` | Ordered setup steps (repo, migrations, CI, latency gate, observability) | MIG-1/2/4, PERF-1, PROC-3 |
+| `CLAUDE.md.template` | Project instructions: write-time defaults + the QA gate cycle | FAIL-1, BOUNDARY-1/2/3/4/7, PERF-2, RESIL-1/3/4, DIST-1, QA-1/2/6/7, AGENT-* |
+| `ARCHITECTURE_INVARIANTS.md` | Structural invariants to fix **before** writing features | SEAM-1/2/3/4, BOUNDARY-5/7, RESIL-1/2/3/4, DIST-1/2/3, AGENT-T/K/A/P/I |
+| `QA_GATE_CHECKLIST.md` | The gate: panel-before-commit, tests-as-deliverable, measurement honesty | QA-1/2/3/4/5/6/7 |
+| `DAY1_RUNBOOK.md` | Ordered setup steps (repo, migrations, CI, resilience, latency gate, observability) | MIG-1/2/4/5, PERF-1, RESIL-1/2, DIST-1, PROC-3 |
 
 **Part 2 — Runnable scaffold (`scaffold/`, opinionated TS/Next + Postgres).** Files use
 `.template`/`.example` suffixes so they're **copy-then-edit**, not imported as-is.
@@ -32,7 +32,12 @@ compiler, a test, or a CI gate — so they can't silently rot.
 | `scaffold/contract/idempotency.ts` | Idempotency-key helper + unique-constraint note | AGENT-I |
 | `scaffold/tests/contract.example.test.ts` | Write→read round-trip + seam-registry idea | SEAM-2 |
 | `scaffold/tests/property.example.test.ts` | Totality / surjectivity / idempotency / round-trip | SEAM-3 |
-| `scaffold/ci/ci.yml.template` | GitHub Actions: concurrency + path filters + test job | PERF-1 (gate slot), PROC-3 |
+| `scaffold/tests/metamorphic.example.test.ts` | Metamorphic relations + boundary fuzzing for non-deterministic output | QA-7 |
+| `scaffold/resilience/circuit-breaker.example.ts` | Circuit breaker (open/half-open/closed) + bulkhead note | RESIL-1, RESIL-2 |
+| `scaffold/resilience/adaptive-throttle.example.ts` | SRE adaptive client throttle + backoff with jitter | RESIL-3, RESIL-4 |
+| `scaffold/distributed/transactional-outbox.sql` | Outbox table + partial unprocessed index | DIST-1 |
+| `scaffold/distributed/outbox-publisher.example.ts` | Atomic entity+event write, at-least-once poller, idempotent consumer | DIST-1, DIST-3, DIST-2 (note) |
+| `scaffold/ci/ci.yml.template` | GitHub Actions: concurrency + path filters + test + mutation job | PERF-1 (gate slot), QA-6, PROC-3 |
 | `scaffold/ci/latency-gate.example.ts` | Hot-path latency gate (avg<500ms / p95<1000ms) | PERF-1 |
 
 ---
@@ -56,7 +61,11 @@ point of the taxonomy).
    concurrency + path filters, latency gate, prod-schema-snapshot test DB, minimum
    observability, and copy the critical-gap-audit skill into `.claude/skills/`.
 6. **Copy `scaffold/` files** into the matching paths and edit for your domain. The
-   property and contract tests should pass before you write feature #1.
+   property, contract, and metamorphic tests should pass before you write feature #1. If the
+   service is horizontally scaled, calls an external dependency on a request path, or writes
+   to more than one store, also wire the `resilience/` (RESIL-*) and `distributed/` (DIST-*)
+   scaffold — these are nearly impossible to retrofit once the dual-write / unbounded-retry
+   paths are scattered.
 
 ---
 

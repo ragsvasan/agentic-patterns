@@ -138,6 +138,93 @@ to grow per-entity, it's a table.
 
 ---
 
+## INV-7 — No SSRF via a model-influenced URL (BOUNDARY-7)
+
+> Applies if any tool fetches a resource from a URL — or builds one from an identifier — that
+> the LLM supplied or that came from attacker-controllable content. Skip if no tool fetches a
+> model-influenced destination.
+
+**Invariant:** any tool that fetches a model-influenced URL validates the **resolved**
+destination against an allowlist (scheme + host) and blocks private/link-local ranges *after*
+DNS resolution. Prefer opaque IDs resolved server-side over free-form URLs.
+
+**Why:** BOUNDARY-7 — because the model can be steered by injected content (AGENT-S), an
+attacker drives it to fetch an internal target, most dangerously the cloud metadata endpoint
+`http://169.254.169.254/…`, exfiltrating the instance's service-account token and escalating to
+full cloud compromise (OWASP LLM05 / SSRF).
+
+**How to encode it:**
+- Validate the resolved destination *after* DNS resolution (defeats DNS rebinding), not the raw
+  string. Block `169.254.0.0/16`, `10/8`, `127/8`, `::1`, and the other private/link-local ranges.
+- Allowlist scheme + host; reject everything else with a typed error.
+- Where possible, accept an **opaque ID** the server resolves to a URL it controls — never a
+  free-form URL from the model.
+
+**Day-1 check:** grep tools that take a URL/host/identifier and fetch it. Is the destination
+allowlisted and are private/link-local IPs blocked *post-resolution*?
+
+---
+
+## INV-8 — Resilience under load (RESIL-1/2/3/4)
+
+> Applies if the service is horizontally autoscaled, fronts a shared datastore, calls an
+> external dependency on a request path, or is driven by an LLM client that can retry. Skip for
+> a single-instance, no-external-dependency service.
+
+**Invariant:** every cross-process call is **bounded and isolated** — wrapped in a circuit
+breaker (RESIL-1), drawn from a per-dependency bulkhead pool (RESIL-2), behind a client-side
+adaptive throttle + backoff-with-jitter (RESIL-3), and given a per-call timeout that rolls up
+into an enforced end-to-end request budget (RESIL-4).
+
+**Why:** a public, autoscaled deployment with an LLM retrying on timeout violates the
+trusted-low-throughput assumption the seam/boundary invariants were written under. A transient
+slow query becomes a self-inflicted denial of service: retries multiply, the autoscaler adds
+instances, each opens its own pool, and Postgres `max_connections` is exhausted — global
+blackout. (Nygard *Release It!* ch. 4–5; Google SRE ch. 21–22.)
+
+**How to encode it:**
+- One breaker **per dependency** (never one global) — see `scaffold/resilience/circuit-breaker.example.ts`.
+- A bounded concurrency pool per external dependency class (the bulkhead).
+- Adaptive throttle (`max(0, (requests − K·accepts)/(requests + 1))`, `K=2`) + backoff with
+  jitter — see `scaffold/resilience/adaptive-throttle.example.ts`.
+- Size pools so `max_instances × pool_size < Postgres max_connections`.
+
+**Day-1 check:** grep cross-process calls (`fetch`, `httpx`, `pool.acquire`, MCP client calls).
+Is each wrapped in a breaker + timeout? Compute `max_instances × pool_size` — under the DB
+ceiling?
+
+---
+
+## INV-9 — No raw dual write; outbox + idempotent consumer (DIST-1/2/3)
+
+> Applies if any single logical action writes to more than one store, service, or external
+> system. Skip for strictly single-database systems.
+
+**Invariant:** a logical action that spans two stores never does a raw dual write (DB then a
+second-service call). It writes the business row **and** an event row in **one** ACID
+transaction (the **transactional outbox**, DIST-1); a separate publisher forwards the event
+at-least-once; the **consumer is idempotent** on the event id (DIST-3). Multi-service operations
+that genuinely can't share a transaction use an orchestrated **saga** with compensating
+transactions (DIST-2) — but first collapse to one transaction if you can.
+
+**Why:** DIST-1 — a crash between the local commit and the second-service call leaves the two
+stores permanently divergent with nothing to roll back. AGENT-T's two-stage commit and AGENT-I's
+idempotency key both operate inside *one* database; neither can undo a commit that already landed
+in a different one. (Kleppmann *DDIA* ch. 9; Hohpe & Woolf *EIP*.)
+
+**How to encode it:**
+- `scaffold/distributed/transactional-outbox.sql` (outbox table + partial unprocessed index) +
+  `scaffold/distributed/outbox-publisher.example.ts` (atomic write, at-least-once poller,
+  idempotent consumer).
+- Dedupe every consumer on the event id (unique constraint or idempotent `UPSERT`) — assume each
+  event arrives twice.
+
+**Day-1 check:** grep for a DB write followed by an external/second-service call in the same
+handler with no outbox between them. For each event/queue/webhook consumer, is there a dedupe on
+event id?
+
+---
+
 ## The day-1 sequence
 
 1. Decide the canonical id/enum space and write `scaffold/contract/canonical-ids.ts` (INV-1,
@@ -148,3 +235,8 @@ to grow per-entity, it's a table.
 4. Create the INV-2 matrix above with at least your first write entry point and its
    round-trip test.
 5. If agentic: wire idempotency + two-stage commit + module-scope gate sets (INV-6).
+6. If any tool fetches a model-influenced URL: allowlist + post-resolution private-IP block
+   (INV-7).
+7. If autoscaled / calls an external dependency on a request path: breaker + bulkhead + throttle
+   + timeout budget (INV-8).
+8. If any action writes to two stores: the transactional outbox + idempotent consumer (INV-9).

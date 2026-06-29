@@ -44,6 +44,23 @@ not suggestions; they are the default shape of every function you write.
 - **No blocking IO in the hot path (PERF-1).** No synchronous loopback, blocking
   `open`/`sleep`/`requests` in an `async` request path. One blocking call added to a
   per-request path is a latency cliff for *every* call.
+- **Every cross-process call is bounded + isolated (RESIL-1/2/4).** Wrap each downstream (DB,
+  external API, second MCP server) in a circuit breaker, give it a per-call timeout
+  (`AbortSignal.timeout` / `asyncio.wait_for`), and draw it from a per-dependency bulkhead pool
+  — never one global pool. A fast typed error beats a hung request. See
+  `scaffold/resilience/circuit-breaker.example.ts`.
+- **Bound the retry rate, not just retry safety (RESIL-3).** Client-side adaptive throttle +
+  backoff-with-jitter on retries; size connection pools so `max_instances × pool_size <`
+  Postgres `max_connections`. AGENT-I makes retries *safe* but does not bound their *rate*. See
+  `scaffold/resilience/adaptive-throttle.example.ts`.
+- **No raw dual write across stores — use the transactional outbox (DIST-1/3).** If a handler
+  writes the DB then calls a second service/queue, write the entity **and** an event row in one
+  ACID transaction and forward via a separate poller; make every consumer idempotent on the
+  event id. See `scaffold/distributed/`.
+- **Validate model-influenced URLs before fetching (BOUNDARY-7).** Any tool that fetches a URL
+  the LLM supplied (or builds from an identifier) allowlists scheme + host and blocks
+  private/link-local IPs *after* DNS resolution — most critically the metadata endpoint
+  `169.254.169.254`. Prefer opaque server-resolved IDs over free-form URLs.
 - **No `any` (TS).** Use `unknown` and narrow with `instanceof` / `typeof` / Zod `.parse()`.
   Exhaustive `switch` on a union gets a `never` default (ties to SEAM-3).
 
@@ -84,6 +101,14 @@ code → tests → panel → fix → tests → panel → (repeat until clean) �
   in TS) — a bare mock that accepts any signature hides drift for months.
 - **Write the regression test before the fix (FAIL-5).** A fix isn't done until a test fails
   before it and passes after, entering at the public entry point.
+- **Mutation-test the logic core (QA-6).** Line coverage is execution, not verification. Run
+  Stryker / `mutmut` on the business-logic core with a mutation-score floor; a surviving mutant
+  is a test that asserts nothing. Don't trust an after-the-fact or LLM-written test until a
+  mutant dies for it.
+- **An oracle for non-deterministic output (QA-7).** For any model-backed / probabilistic
+  output, assert a **metamorphic relation** (more duration ⇒ strictly more calories) instead of
+  an exact string, and **fuzz the untrusted input boundary** (fast-check / Hypothesis). See
+  `scaffold/tests/metamorphic.example.test.ts`.
 
 ---
 
@@ -96,6 +121,12 @@ code → tests → panel → fix → tests → panel → (repeat until clean) �
 - **NOT NULL without DEFAULT ⇒ patch every INSERT (MIG-3).** Adding a NOT NULL column with
   no DEFAULT requires grepping every `INSERT INTO <table>` and confirming each includes it,
   or adding a DEFAULT.
+- **Rolling deploy ⇒ expand/contract, never a destructive migration in one shot (MIG-5).** Old
+  and new containers serve traffic concurrently, so a single-revision `NOT NULL`-without-default
+  / rename / drop / type-narrow crashes the still-running old container. "Same commit" (MIG-2)
+  does not save you. Split into **Expand** (additive migration + write-both/read-old) →
+  **Migrate** (background backfill) → **Contract** (read/write new only; final tightening
+  migration *after* old containers retire).
 - **Commit ≠ push ≠ deploy (PROC-6).** Commit and stop; state what's ready; wait for
   explicit approval. Deploys are manual.
 

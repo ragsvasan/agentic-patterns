@@ -7,6 +7,9 @@
 #           in ci/latency-gate.example.ts.
 #   MIG-4   (clean-DB tests miss prod surface): the test job seeds Postgres from the prod
 #           schema snapshot, not an empty DB.
+#   QA-6    (tautological assertions): the mutation-testing job (Stryker) injects operator/
+#           return mutants; a surviving mutant is a test that asserts nothing. Optional/manual
+#           by default — it's slow — but kept here so the gate is one uncomment away.
 #
 # The two MANDATORY blocks (standing rule — every workflow gets these):
 #   1. concurrency.cancel-in-progress  → cancels stale runs on rapid pushes.
@@ -27,6 +30,8 @@ on:
       - '.gcloudignore'
   pull_request:
     branches: ["main"]
+  # workflow_dispatch — lets the optional mutation job (QA-6) be run on demand from the UI.
+  workflow_dispatch:
 
 # concurrency — cancel an in-flight run when a newer commit lands on the same ref.
 concurrency:
@@ -76,3 +81,26 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Hot-path latency gate (avg<500ms / p95<1000ms)
         run: pnpm tsx ci/latency-gate.example.ts
+
+  mutation:
+    # QA-6: mutation testing — fault-detection, not line coverage. A surviving mutant means a
+    # test that executes the code but asserts nothing (a tautological assertion). Set a
+    # mutation-score floor in stryker.conf for the LOGIC CORE only (it's slow on a full suite).
+    #
+    # Off by default — it's the slowest job. Two ways to enable when the logic core stabilizes:
+    #   - manual: keep `workflow_dispatch` and run it on demand, or
+    #   - gated: change `if:` to run on a label/schedule rather than every push.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Mutation testing (Stryker) — fails below the score floor
+        # Scope mutate globs to the business-logic core in stryker.conf.json; a sub-50% score
+        # under 80% line coverage is the signature of tautological tests.
+        run: pnpm dlx @stryker-mutator/core run

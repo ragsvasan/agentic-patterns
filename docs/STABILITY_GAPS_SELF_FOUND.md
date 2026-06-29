@@ -168,16 +168,21 @@ Each entry lists: **the incident**, **the gap class it revealed**, and **where t
 
 ## Gaps we have NOT yet verified
 
+> **Resolved by external review (2026-06-29).** Gemini Deep Research confirmed the
+> distributed-coordination and resilience rows against named canon; they are now
+> first-class themes. SBOM was *not* confirmed and stays advisory. Full mapping in
+> [`GEMINI_REVIEW_RECONCILIATION.md`](GEMINI_REVIEW_RECONCILIATION.md).
+
 These were identified as potential gaps but not confirmed with production incidents:
 
-| Gap | Status | Note |
-|-----|--------|------|
-| Distributed dual-write / transactional outbox | Not addressed | May belong as Theme I — waiting for Gemini |
-| Supply-chain / SBOM integrity | Partial (PROC-2) | Covered as advisory; not a first-class probe |
-| Circuit breaker / bulkhead (Nygard ch.4-5) | Not addressed | PERF-* covers latency but not cascading failure |
-| Canary / progressive delivery gating | Not addressed | Deployments are manual (PROC-6); no automated rollback |
-| Secret rotation during live traffic | Not addressed | Managed via Secret Manager; rotation runbook absent |
-| Saga / compensation for multi-table writes | Not addressed | Relevant: plan save touches 3 tables; no compensation on partial failure |
+| Gap | Original status | Post-review status |
+|-----|-----------------|--------------------|
+| Distributed dual-write / transactional outbox | Not addressed | **Confirmed → Theme J / DIST-1** |
+| Saga / compensation for multi-table writes | Not addressed | **Confirmed → Theme J / DIST-2** |
+| Circuit breaker / bulkhead (Nygard ch.4-5) | Not addressed | **Confirmed → Theme I / RESIL-1, RESIL-2** |
+| Supply-chain / SBOM integrity | Partial (PROC-2) | Not confirmed by review — stays PROC-2 advisory |
+| Canary / progressive delivery gating | Not addressed | Out of review scope — still open |
+| Secret rotation during live traffic | Not addressed | Out of review scope — still open |
 
 ---
 
