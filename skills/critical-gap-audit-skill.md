@@ -18,7 +18,7 @@ resilience-under-load gaps, distributed-correctness (dual-write) gaps, and
 `/audit-mcp`, which only covers MCP tool ergonomics. Produces a PASS / FAIL / PARTIAL /
 N-A table with file + line references and a prioritized "these will bite you" shortlist.
 
-**Coverage:** 10 themes (A–J), ~42 gap classes.
+**Coverage:** 11 themes (A–K), ~48 gap classes.
 
 **The skill does NOT fix code — it audits and reports only.** No edits, no commits.
 
@@ -168,7 +168,12 @@ Grep recipes (Python `.py` and TypeScript `.ts` variants where relevant):
 - **QA-2** tests written after code — do recent feature commits include their tests? Test
   at the entry point for each new gate?
 - **QA-3** measurement not honest — are results classified (VPASS/VFAIL/QUAL/ART/NA) or one
-  pass/fail number? Per-scenario state isolation? Test-mode TTLs match prod?
+  pass/fail number? Per-scenario state isolation with `try/finally` teardown? Fresh UUID
+  test tenant per run or shared constant (`test-user-001`)? **testMode TTLs ≥ production
+  TTLs** at every gate-read site (a 30-min test window vs 48h prod window makes long audit
+  runs flaky at minute 31 — Stryde incident 2026-06-14). **Test seeds use past dates** (≥2
+  days ago) for time-sensitive policies, never "today" (same-day seeds contaminate every
+  downstream scenario that checks today's load/state).
 - **QA-4** seam defects (L2) misdiagnosed as model failures (L1) — when output looks wrong,
   can you reproduce by calling tools directly with no model? Is there a seam contract for it?
 - **QA-5** no regression baseline / ledger — is there a dated `docs/audits/` ledger with
@@ -180,6 +185,12 @@ Grep recipes (Python `.py` and TypeScript `.ts` variants where relevant):
   line coverage is the tautological-test signature). **PARTIAL** if mutation testing exists but
   no CI mutation-score floor on critical modules. Spot-check: pick one critical function,
   invert an operator (`>`→`<`, `+`→`-`) — does any test fail?
+- **QA-8** log-parsing fragility — grep for test assertions that match on internal log
+  fields: `grep -rn "l\.level\|l\.event\|\.event ===\|caplog\|LogCapture\|log.*called\|assert.*log" $ROOT/test*`. For each: is there an alternative assertion on observable output
+  (return value, DB state, HTTP response)? Would the test pass if warn-level logs were
+  filtered out (as in many staging/CI configs)? **FAIL** if a test's only assertion is
+  on log output and the log level could be filtered. **PARTIAL** if log assertion exists
+  alongside an observable-output assertion.
 - **QA-7** no oracle for non-deterministic output (missing metamorphic relations) — for each
   non-deterministic/LLM tool, is there at least one *metamorphic relation* asserted (relative
   behavior across related inputs — longer workout ⇒ strictly higher estimate, etc.) rather than
@@ -273,9 +284,33 @@ action writes to >1 store / service / external system; else N-A — see Step 1 g
   (AGENT-I dedupes the *producer's* write tool; DIST-3 is the *consumer* of the event stream.)
   **N-A** if there are no event/queue/webhook consumers.
 
+**Theme K — LLM Interface Integrity** *(agentic / MCP / LLM-client ONLY; else N-A)*
+- **IFACE-1** call trigger absent — read each tool description aloud. Does it contain a
+  trigger condition ("call when…", "use before…", "invoke if the user says…") OR only a
+  capability description? `grep -rn "description\|\"desc\"\|tool_description" $ROOT --include="*.ts" --include="*.py" | grep -v "^Binary"`. For each description lacking a trigger,
+  run the scenario that should invoke it — does the LLM call it without being explicitly
+  directed? **FAIL** if any consequential tool (especially data-fetching tools that gate
+  coaching advice) has a description with no trigger condition. **PARTIAL** if some have
+  triggers and others don't.
+- **IFACE-2** schema-description-behavior three-way mismatch — for each tool, compare:
+  (a) params in JSON/Zod schema, (b) params mentioned in description prose, (c) params
+  actually read in the handler body (`grep -n "args\.\|input\.\|params\." handler`). Any
+  param declared but not mentioned in description: **PARTIAL**. Any param declared but not
+  read in handler: **FAIL** (silent discard). Any param described but not in schema: **FAIL**
+  (LLM tries to send it; schema rejects). Contract test: pass the param, assert output
+  changed.
+- **IFACE-3** description debt / stale claims / false negations — grep all tool
+  descriptions for mentions of other tool names by string: do those tools still exist in
+  the manifest? `grep -ohE '"[a-z_]+"' $ROOT/manifest* | sort -u` vs `grep -ohE 'name: "[a-z_]+"' $ROOT/manifest*`. Any required params undocumented? Any description that asserts
+  another tool "doesn't exist" or "is unavailable"? **FAIL** if any false negation or
+  reference to a dead tool name. **PARTIAL** if undocumented required params only.
+
+*(Add IFACE-* to Step 1 stack detection: only probe when `tools/list` / `inputSchema` /
+`@mcp.tool` / `McpServer` is detected — same gating as AGENT-.)*
+
 ### Step 3 — Report
 
-Emit **one consolidated table grouped by theme** (A–J), each row: `ID | gap | status |
+Emit **one consolidated table grouped by theme** (A–K), each row: `ID | gap | status |
 file:line evidence`. Then a prioritized **"These will bite you"** shortlist: every FAIL
 first, ordered by blast radius (silent data corruption / auth bypass / cloud-credential
 exfil > availability/cascade > latency > ergonomics), each line ending with the taxonomy's
@@ -288,8 +323,9 @@ Blast-radius ordering hint:
   (SSRF → metadata-endpoint / SA-token exfil) sit at the top of the security band.
 - **Availability / cascading failure:** RESIL-1/2/3/4 — a transient slow peer becoming a
   self-inflicted global blackout outranks plain latency.
-- **Middle (latency):** PERF-*.
-- **Context (process / honesty):** QA-* (incl. QA-6/7) / PROC-*.
+- **Middle (latency / non-determinism):** PERF-* · IFACE-1/2/3 (tool-description flakiness
+  outranks general latency because it causes silent wrong advice, not just slow advice).
+- **Context (process / honesty):** QA-* (incl. QA-6/7/8) / PROC-*.
 
 ---
 

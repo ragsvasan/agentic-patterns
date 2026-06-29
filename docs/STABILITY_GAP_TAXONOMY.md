@@ -364,9 +364,19 @@ good intentions. Measurement honesty is a prerequisite for trusting any of it.*
   state is always reset. **And it must be parallel-safe:** a hardcoded tenant ID
   (`test-user-001`) makes concurrent CI runs truncate each other's data mid-scenario —
   generate a fresh UUID tenant per run and clean up only that tenant's rows.
+  **testMode time windows must match production:** if test-mode uses a tighter TTL than
+  prod (e.g. 30-minute gate visibility window vs. 48h in prod), a scenario that writes a
+  signal and reads it back 31 minutes later silently fails — not a bug, a clock artefact.
+  (Stryde: long audit runs hit this; the gate read returned "inactive" for a signal written
+  earlier in the same run.) Fix: test-mode TTL ≥ production TTL at every gate-read site.
+  **Test seeds must not use today's date for time-sensitive policies:** a seed that logs a
+  workout or signal dated "today" bleeds into every downstream scenario that checks same-day
+  load/state. Log seeds ≥2 days in the past unless the scenario is explicitly testing
+  same-day behaviour.
 - **Probe:** are test results classified, or is it one pass/fail number? Is there
   per-scenario state isolation with `try/finally` teardown? Is the test tenant a fresh
-  UUID per run or a shared constant? Do test-mode TTLs match prod?
+  UUID per run or a shared constant? Do test-mode TTLs match prod (not narrower)? Do test
+  seeds use past dates for time-sensitive policies, or "today"?
 
 ### QA-4 — Seam defects (L2) misdiagnosed as model/quality failures (L1)
 - **Pattern:** a deterministic writer→reader contract drift (enum mismatch, singular/plural,
@@ -385,6 +395,24 @@ good intentions. Measurement honesty is a prerequisite for trusting any of it.*
 - **Day-1 prevention:** a dated audit ledger (run → build SHA → VPASS/VFAIL counts →
   notes). The latest clean sweep is the regression baseline.
 - **Probe:** is there a docs/audits ledger with comparable, dated runs?
+
+### QA-8 — Log-parsing fragility (tests that assert on log event names)
+- **Pattern:** a test verifies behaviour by checking whether a specific structured log
+  event appeared (e.g. `logs.some(l => l.event === 'unknown_entity_type_stored_raw')`).
+  In CI or staging, log level filtering drops `warn`-level events to reduce cost, so the
+  array is empty and the test fails — even when the system behaved correctly. Separately,
+  when an engineer migrates from a custom logger to Pino/Winston, the field names change
+  and every log-parsing assertion breaks simultaneously. Both are false failures; neither
+  reflects a real product bug.
+- **Day-1 prevention:** assert behaviour through the system's *observable output* (return
+  value, DB state, HTTP response) — not through its internal telemetry. Where a side-effect
+  is genuinely only visible in logs (e.g. "did the unknown-type branch fire?"), inject a
+  testable boundary: a counter, a mock callback, or a structured metrics table the test
+  can query directly.
+- **Probe:** grep for test assertions that match on log-level fields or log event-name
+  strings (`l.level`, `l.event`, `logger.*called`, `caplog`, `LogCapture`). For each: is
+  there an alternative assertion on observable output? Would the test pass in an
+  environment where warn-level logs are filtered out?
 
 ### QA-6 — Tautological assertions (line coverage without fault detection)
 - **Pattern:** tests written *after* the code assert whatever the function currently
@@ -693,9 +721,99 @@ defer.
 `docs/retrospective-arc-draft.md`, `GAPS_LOG.md`, `docs/audits/INDEX.md`) and Mnemo
 (`docs/LESSONS-LEARNED.md`). TKA framework: `TKA_WHITEPAPER.md`.*
 
+## Theme K — LLM Interface Integrity (Tool Description Contract)
+
+*An LLM-driven system has an interface the LLM reads at runtime: tool descriptions and
+JSON schemas. When that interface is wrong — a description says what a tool does but not
+when to call it, a parameter exists in the schema but not the description, a description
+claims another tool is absent — the LLM behaves non-deterministically. The tool is correct;
+the interface to it is broken. This is a seam (SEAM-* is the data-contract seam; IFACE-*
+is the LLM-interface seam), and it produces flakiness that looks like model failures (L1)
+until you read the description with fresh eyes.*
+
+*Source incidents: Stryde/Mnemo vitalsync audit (2026-06-25). Four distinct classes
+confirmed as causes of "coach had the right tool and didn't use it / used it wrong."*
+
+**Applies to:** agentic / MCP / LLM-client systems only. Skip for non-agentic projects.
+
+### IFACE-1 — Call trigger absent: description says what, not when
+- **Pattern:** a tool description explains what the tool computes but gives no trigger
+  condition — no "call me when the user asks X" or "call me before prescribing Y." The
+  LLM has the tool and the data but doesn't connect them as cause-and-effect. It
+  hallucinates an answer instead of calling the tool. (Stryde: `get_readiness` description
+  said "computes today's readiness" — but in a prescription conversation the LLM never
+  saw it as a trigger. Adding "call me when the user asks how to train today" fixed it.)
+- **Day-1 prevention:** every tool description has two parts: (a) what it returns, (b)
+  the specific user-intent or conversational trigger that should cause the LLM to call it.
+  Phrased as "call this tool when…" or "use me before prescribing X." Audit by asking:
+  could the LLM read this description and know, without guessing, when to invoke this tool?
+- **Probe:** read each tool description aloud. Does it contain a trigger condition ("call
+  when…", "use before…", "invoke if the user says…")? Or only a capability description?
+  For each missing trigger, test by running the scenario that should invoke it — did the
+  LLM call it?
+
+### IFACE-2 — Schema-description-behavior three-way mismatch
+- **Pattern:** a parameter is declared in the JSON schema but not mentioned in the
+  description, or described in the description but absent from the schema, or mentioned
+  in both but silently ignored by the handler. Any mismatch in this three-way contract
+  produces opaque behavior: the LLM gathers information it silently discards, or passes
+  arguments the handler never reads. (Stryde: `generate_plan` accepted `primaryModalities`
+  in schema; description said "you must know modality preferences"; handler ignored the
+  param and used historical dominant modality. Coach asked athlete, athlete answered,
+  system threw it away.)
+- **Day-1 prevention:** schema, description, and handler must be consistent. When adding
+  a parameter: (1) add it to the schema, (2) mention it in the description, (3) use it
+  in the handler. Changing any one without the others is a gap. A contract test asserts
+  the handler actually uses the parameter (not just accepts it).
+- **Probe:** for each tool, compare: (a) params in JSON schema, (b) params mentioned in
+  description, (c) params read in handler body. Grep for `args.<param>` / `input.<param>`
+  in the handler; any declared param not read is FAIL. Any description param not in schema
+  is FAIL. Do a round-trip test: pass the param and verify the output changed.
+
+### IFACE-3 — Description debt: stale claims and false negations
+- **Pattern:** descriptions accumulate debt as tools are added, renamed, or removed.
+  A description may: claim a required param when it's now optional; state another tool
+  "doesn't exist" when it does (or was renamed); use terminology from a previous API
+  version; assert preconditions that have changed. The LLM reads the false claim as fact
+  and either skips a valid tool or attempts an impossible sequence. (Stryde: `get_fitness_
+  snapshot` falsely stated `get_athlete_dashboard` doesn't exist — the LLM read this and
+  stopped looking for a dashboard tool. Separately: a gate tool required `confirmed=true`
+  + `note` that were undocumented; the LLM couldn't know.)
+- **Day-1 prevention:** descriptions are part of the contract and change with the code.
+  Every tool rename / parameter change / removal triggers a description audit of tools that
+  reference the changed item. Add a grep-based CI step that catches tool-name references
+  in descriptions and validates each named tool still exists.
+- **Probe:** grep all tool descriptions for tool names mentioned in prose — do those tools
+  still exist in the manifest? Are any required params undocumented? Does the tool
+  description version-match the handler behavior (not a prior API shape)?
+
+---
+
+## The two meta-lessons
+
+**Execution:** most failures share a structure — a local check passed while a downstream
+invariant was already broken. Trace the full path before declaring anything done.
+
+**Design:** the design mistakes cluster around *building for the happy path and assuming
+the constraint is temporary* — "we'll only ever have one client," "that's the only entry
+point," "requests won't burst," "this fallback rarely triggers." Every "this is temporary
+/ we'll only ever" assumption is a design risk to eliminate in the current sprint, not
+defer.
+
+---
+
+*Source incidents: Stryde headless coach (`STABILITY_ARCHITECTURE.md`,
+`docs/retrospective-arc-draft.md`, `GAPS_LOG.md`, `docs/audits/INDEX.md`) and Mnemo
+(`docs/LESSONS-LEARNED.md`). TKA framework: `TKA_WHITEPAPER.md`.*
+
 *Themes I (Resilience) & J (Distributed Correctness), plus MIG-5, BOUNDARY-7, AGENT-S/W,
 and QA-6/7, were added after an adversarial external review (Gemini Deep Research,
 2026-06-29) confirmed them against named industry canon — Nygard* Release It! *ch. 4–5,
 Google SRE ch. 21–22, Kleppmann* DDIA *ch. 9, Hohpe & Woolf* EIP*, OWASP LLM Top 10 (2025).
 The reconciliation of every finding (kept / refined / declined) is in
 `GEMINI_REVIEW_RECONCILIATION.md`.*
+
+*Theme K (LLM Interface Integrity / IFACE-1/2/3) and QA-8 were added 2026-06-29 from
+direct production incidents in Stryde vitalsync — four distinct tool-description failure
+modes causing non-deterministic LLM behavior, plus log-parsing fragility as a test-flakiness
+source.*
