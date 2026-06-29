@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# new-project <path>
+# Copies the fast-start template into a new project directory.
+# Usage: ~/agentic-patterns/bin/new-project ~/mynewproject
+set -euo pipefail
+
+TEMPLATE="$(cd "$(dirname "$0")/../templates/fast-start" && pwd)"
+DEST="${1:?Usage: new-project <path-to-new-project>}"
+
+mkdir -p "$DEST"
+DEST="$(cd "$DEST" && pwd)"
+
+echo "→ Copying fast-start template into $DEST"
+
+# ── Docs & checklists ──────────────────────────────────────────────────────
+cp "$TEMPLATE/ARCHITECTURE_INVARIANTS.md"  "$DEST/ARCHITECTURE_INVARIANTS.md"
+cp "$TEMPLATE/QA_GATE_CHECKLIST.md"        "$DEST/QA_GATE_CHECKLIST.md"
+cp "$TEMPLATE/DAY1_RUNBOOK.md"             "$DEST/DAY1_RUNBOOK.md"
+cp "$TEMPLATE/CLAUDE.md.template"          "$DEST/CLAUDE.md"
+
+# ── Scaffold code ──────────────────────────────────────────────────────────
+mkdir -p "$DEST/scaffold/contract" "$DEST/scaffold/tests" \
+         "$DEST/scaffold/ci" "$DEST/scaffold/resilience" \
+         "$DEST/scaffold/distributed"
+
+cp "$TEMPLATE/scaffold/contract/"*.ts         "$DEST/scaffold/contract/"
+cp "$TEMPLATE/scaffold/tests/"*.ts            "$DEST/scaffold/tests/"
+cp "$TEMPLATE/scaffold/ci/ci.yml.template"    "$DEST/scaffold/ci/ci.yml.template"
+cp "$TEMPLATE/scaffold/ci/latency-gate.example.ts" "$DEST/scaffold/ci/"
+cp "$TEMPLATE/scaffold/resilience/"*.ts       "$DEST/scaffold/resilience/"
+cp "$TEMPLATE/scaffold/distributed/"*         "$DEST/scaffold/distributed/"
+
+# ── Claude Code skill → .claude/commands ──────────────────────────────────
+mkdir -p "$DEST/.claude/commands"
+SKILL="$(cd "$(dirname "$0")/../skills" && pwd)/critical-gap-audit-skill.md"
+cp "$SKILL" "$DEST/.claude/commands/critical-gap-audit.md"
+
+echo ""
+echo "Done. Files written to $DEST"
+echo ""
+echo "Next steps (open CLAUDE.md first):"
+echo "  1. Edit CLAUDE.md — fill in your stack (TypeScript/Python, DB, deploy target)"
+echo "  2. Fill in ARCHITECTURE_INVARIANTS.md — the contract matrix before any feature code"
+echo "  3. Follow DAY1_RUNBOOK.md top to bottom"
+echo "  4. Run /critical-gap-audit in Claude Code when you want a gap check"
