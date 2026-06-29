@@ -22,10 +22,10 @@ N-A table with file + line references and a prioritized "these will bite you" sh
 
 **The skill does NOT fix code — it audits and reports only.** No edits, no commits.
 
-**Source of truth:** the gap taxonomy at `../docs/STABILITY_GAP_TAXONOMY.md` (relative
-to this skill). **Read it first** — every gap-class ID, its "Probe" line, and its day-1
-prevention come from there. If the taxonomy changes, this skill follows it; do not
-invent gap classes the taxonomy doesn't define. You may add concrete probe commands.
+**Source of truth:** the gap taxonomy at `/Users/rags/agentic-patterns/docs/STABILITY_GAP_TAXONOMY.md`.
+**Read it first** — every gap-class ID, its "Probe" line, and its day-1 prevention come
+from there. If the taxonomy changes, this skill follows it; do not invent gap classes the
+taxonomy doesn't define. You may add concrete probe commands.
 
 ---
 
