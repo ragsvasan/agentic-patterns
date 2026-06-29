@@ -1,0 +1,78 @@
+# ci.yml.template — GitHub Actions for a fast-start project.
+#
+# PREVENTS:
+#   PROC-3  (observability/gates after incidents): tests + the latency gate run from the
+#           first PR, not retrofitted week 4.
+#   PERF-1  (blocking call in the hot path): the latency-gate job is the slot for the gate
+#           in ci/latency-gate.example.ts.
+#   MIG-4   (clean-DB tests miss prod surface): the test job seeds Postgres from the prod
+#           schema snapshot, not an empty DB.
+#
+# The two MANDATORY blocks (standing rule — every workflow gets these):
+#   1. concurrency.cancel-in-progress  → cancels stale runs on rapid pushes.
+#   2. push.paths-ignore for docs/config → skip CI for non-code changes.
+#
+# Copy to .github/workflows/ci.yml and edit the package-manager + DB-seed commands.
+
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+    # paths-ignore — do NOT burn CI minutes on docs/config-only changes.
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE'
+      - '.gcloudignore'
+  pull_request:
+    branches: ["main"]
+
+# concurrency — cancel an in-flight run when a newer commit lands on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      # MIG-4: seed the test DB from the PROD schema snapshot, not a clean migrate.
+      # Commit db/schema-snapshot.sql from `pg_dump --schema-only` of prod (see DAY1_RUNBOOK §3).
+      - name: Seed test DB from prod schema snapshot
+        run: psql "$TEST_DATABASE_URL" < db/schema-snapshot.sql
+
+      - name: Tests
+        run: pnpm vitest run 2>&1 | tee /tmp/vitest-ci.txt
+
+  latency-gate:
+    # PERF-1: only run on changes that touch the hot path; keep it fast (<30s).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Hot-path latency gate (avg<500ms / p95<1000ms)
+        run: pnpm tsx ci/latency-gate.example.ts

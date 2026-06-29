@@ -1,0 +1,109 @@
+# <PROJECT_NAME> — Claude Code Instructions  (fast-start template)
+
+> Copy to your repo root as `CLAUDE.md` and fill in the `<...>` slots. These instructions
+> OVERRIDE default behavior — Claude Code must follow them exactly. Every rule below maps
+> to a gap class in `STABILITY_GAP_TAXONOMY.md` (cited inline). Keep the citations — they
+> tell a future reader *why* the rule exists.
+
+## Session Start
+
+- **Stack:** `<e.g. Next.js + TypeScript + Postgres / FastAPI + Postgres>`
+- Before writing or reviewing any feature, read **`ARCHITECTURE_INVARIANTS.md`** (the
+  structural invariants) and **`QA_GATE_CHECKLIST.md`** (the commit gate). They are the
+  contract this project is built on; a change that violates one is wrong even if it compiles.
+- One task per session. Load context for the current task only.
+
+---
+
+## Write-Time Defaults — apply to every function without being asked
+
+These are the cheapest possible prevention for the most expensive gap classes. They are
+not suggestions; they are the default shape of every function you write.
+
+- **Validate at the entry boundary (BOUNDARY-1).** Parse `req.body`, route params, and
+  tool/CLI args with a Zod/Pydantic schema *at the handler*. Never access `body.foo` /
+  `data["key"]` on untrusted input without a parse first. The boundary owns the contract;
+  helpers trust it — never re-validate deep inside.
+- **Auth first, fail closed (BOUNDARY-2).** `auth()` (or equivalent) is the **first line**
+  of every protected handler, before any DB read. Any exception in the auth check
+  *rejects* the request — never falls through to allow. `user?.id` in a route that requires
+  auth is a lie: if auth passed, `user` is not optional.
+- **Tenant/owner column in every write WHERE (BOUNDARY-4).** Every `UPDATE`/`DELETE` and
+  every owner-scoped `SELECT` filters on the tenant/owner column, not just the PK. `LIMIT`
+  on every user-facing read.
+- **Soft-delete filter everywhere (BOUNDARY-3).** When a model gains `deleted_at`, add
+  `deleted_at IS NULL` to *every* auth/read query against that table in the same change —
+  especially the auth lookup. A soft-deleted user with a live session is an auth bypass.
+- **Typed errors, no silent catch (FAIL-1).** Every `catch (e: unknown)` / `except`
+  narrows before use and then re-throws, returns a typed error, or logs + returns a safe
+  value. No bare `except Exception` / `catch` near IO that absorbs an unexpected type and
+  runs a fallback. Generic message to the client, structured error to the logger — never
+  leak table/column/constraint names.
+- **`Promise.all` / `asyncio.gather` by default (PERF-2).** Independent awaits run in
+  parallel; sequential only when the first feeds the second.
+- **No blocking IO in the hot path (PERF-1).** No synchronous loopback, blocking
+  `open`/`sleep`/`requests` in an `async` request path. One blocking call added to a
+  per-request path is a latency cliff for *every* call.
+- **No `any` (TS).** Use `unknown` and narrow with `instanceof` / `typeof` / Zod `.parse()`.
+  Exhaustive `switch` on a union gets a `never` default (ties to SEAM-3).
+
+### If this project has an LLM/agent that can write state (AGENT-*)
+
+Skip this block for non-agentic projects.
+
+- **Idempotency key on every write tool (AGENT-I).** Accept an optional `idempotency_key`
+  (derive from an input hash if omitted), store with a unique constraint, return the
+  existing record on conflict. LLM clients retry on *timeout*, not just network error — one
+  logical action writes twice without this. See `scaffold/contract/idempotency.ts`.
+- **Two-stage commit for destructive/consequential writes (AGENT-T).** No `confirmed=true`
+  param ⇒ preview only, no state change. The model proposes; a deterministic layer commits.
+- **Gate-exempt sets at module scope, not in the handler (AGENT-T).** A gate the request
+  handler can reconfigure is not a gate.
+- **Fixed category space (AGENT-A).** Enums, tool set, and permission scopes are fixed at
+  build time. A value the persistence layer has never seen is rejected, not absorbed (ties
+  to SEAM-3 — see the canonical-id guard in `scaffold/contract/canonical-ids.ts`).
+
+---
+
+## QA Gate — the commit cycle (QA-1, QA-2)
+
+Full detail in `QA_GATE_CHECKLIST.md`. The non-negotiable shape:
+
+```
+code → tests → panel → fix → tests → panel → (repeat until clean) → commit
+```
+
+- **Tests are part of the deliverable (QA-2).** Write them in the *same change* as the
+  code, never "later." Every new gate gets one test entering at the public entry point that
+  asserts the gate fired. Every new enum/format gets one load→process→output test.
+- **The review panel runs *before* the commit (QA-1), not after.** A review after commit is
+  documentation, not quality control. Tier the panel by risk (see checklist) so it's cheap
+  on low-risk diffs and thorough on auth/DB/agent-write diffs.
+- **Integration tests hit real DB/APIs where possible (FAIL-3).** No mock-only coverage of
+  a write path. Signature-enforced doubles only (`create_autospec` in Python; typed doubles
+  in TS) — a bare mock that accepts any signature hides drift for months.
+- **Write the regression test before the fix (FAIL-5).** A fix isn't done until a test fails
+  before it and passes after, entering at the public entry point.
+
+---
+
+## Migrations & deploys
+
+- **Schema changes go through the migration tool, in-band, in the same commit as the code
+  that needs them (MIG-1, MIG-2).** Never `psql` a schema change straight to prod — it
+  breaks the migration chain permanently. The migration ships *with* the code that
+  references the new table/column.
+- **NOT NULL without DEFAULT ⇒ patch every INSERT (MIG-3).** Adding a NOT NULL column with
+  no DEFAULT requires grepping every `INSERT INTO <table>` and confirming each includes it,
+  or adding a DEFAULT.
+- **Commit ≠ push ≠ deploy (PROC-6).** Commit and stop; state what's ready; wait for
+  explicit approval. Deploys are manual.
+
+---
+
+## Navigation & efficiency
+
+- **grep before read** — locate the symbol first; read the file only if grep isn't enough.
+- **Parallel reads** — when N files are needed, issue all N Read calls in one message.
+- **Never re-read a file after editing** — Edit/Write error on failure; if they didn't
+  error, the change landed.
