@@ -308,6 +308,66 @@ action writes to >1 store / service / external system; else N-A — see Step 1 g
 *(Add IFACE-* to Step 1 stack detection: only probe when `tools/list` / `inputSchema` /
 `@mcp.tool` / `McpServer` is detected — same gating as AGENT-.)*
 
+### Step 2.5 — Vet every FAIL before it ships (non-negotiable)
+
+A grep hit is a candidate, not a finding. Every item tentatively marked **FAIL** must
+pass all four checks below before it appears in the report. An item that fails any check
+is silently downgraded to **PARTIAL** (note the doubt) or **PASS** (if the guard exists
+elsewhere). Never report a FAIL you haven't read.
+
+**Check 1 — File exists.**
+```bash
+ls <flagged-file-path>
+```
+If the file is absent, discard the finding entirely. Do not infer a path from a grep
+match — confirm it literally. This catches fabricated paths from partial grep context.
+
+**Check 2 — Read the flagged function, not just the grep hit line.**
+Use `Read` with `offset`+`limit` to read the full function body (or at minimum ±15 lines
+around the hit). Confirm the flaw is actually present in the code as written.
+- For **WHERE-clause findings** (BOUNDARY-4, DIST-*): read the full SQL string, not just
+  the line that matched. A grep hit on `UPDATE profiles SET` may have `WHERE org_id = $1`
+  two lines below.
+- For **auth-ordering findings** (BOUNDARY-2): read from the function signature to the
+  first DB call to confirm auth truly comes after.
+
+**Check 3 — For `create_task` / fire-and-forget findings (FAIL-4): read ±15 lines.**
+Before marking FAIL, grep for a store pattern near the call site:
+```bash
+grep -n "create_task\|_tasks\|add_done_callback\|task_ref\|_scan_tasks\|_audit_tasks" <file> | head -20
+```
+If the task is stored in a module-level set with `add_done_callback`, it is already
+guarded — the finding is **PASS**. Only mark FAIL if neither storage nor a done-callback
+exists anywhere near the call site.
+
+**Check 4 — For multi-store / DIST / FAIL-2 findings: confirm the code path is reachable.**
+Before flagging a Redis / cache / external-client write as live:
+```bash
+# Find the init / factory function
+grep -rn "def get_redis_client\|def _get_redis_client\|RedisClient\|createRedisClient" <root> --include="*.py" | head -5
+```
+If the function returns `None`, uses `getattr(..., None)`, or has a comment like
+"Session N: X is gone", the block it guards never executes. Mark **N-A** (dead code),
+not FAIL. Similarly check for `REDIS_ELIMINATION_COMPLETE` or equivalent docs in the
+repo root before raising any Redis/cache dual-write finding.
+
+**AGENT-K / AGENT-W layer check (stateless MCP servers only).**
+Before flagging AGENT-K (turn cap) or AGENT-W (token/cost ceiling) on an MCP server:
+determine whether the code being audited is the **server side** (handles one tool call
+at a time, stateless between calls) or the **client/orchestrator side** (owns the agent
+loop, tracks turns, accumulates cost). If the code is a server-side MCP handler, AGENT-K
+and AGENT-W are **N-A** — these controls belong at the client layer that drives the loop.
+Only apply AGENT-K / AGENT-W when auditing the orchestrator or LLM client code.
+
+**QA-6 (mutation testing) context check.**
+Before marking QA-6 as FAIL, note the project's test strategy. A project with thousands
+of integration tests running against a real DB may legitimately skip mutation testing at
+this stage — the blast-radius for a missing mutation score is low compared to projects
+with only unit tests. Downgrade to PARTIAL with an advisory note rather than FAIL if
+the test suite is clearly integration-heavy.
+
+---
+
 ### Step 3 — Report
 
 Emit **one consolidated table grouped by theme** (A–K), each row: `ID | gap | status |
